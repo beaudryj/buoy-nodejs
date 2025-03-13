@@ -42,9 +42,9 @@ export class MqttBroker implements Broker {
         }
 
         if (options.mqtt_cert && options.mqtt_key && options.mqtt_ca) {
-            mqttOptions.cert = Buffer.from(options.mqtt_cert, 'base64')
-            mqttOptions.key = Buffer.from(options.mqtt_key, 'base64')
-            mqttOptions.ca = Buffer.from(options.mqtt_ca, 'base64')
+            mqttOptions.cert = Buffer.from(options.mqtt_cert, 'base64').toString('utf-8')
+            mqttOptions.key = Buffer.from(options.mqtt_key, 'base64').toString('utf-8')
+            mqttOptions.ca = Buffer.from(options.mqtt_ca, 'base64').toString('utf-8')
         }
 
         this.client = connect(options.mqtt_url, mqttOptions)

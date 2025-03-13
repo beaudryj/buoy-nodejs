@@ -17,7 +17,7 @@ import setupBroker, {
 } from './broker';
 import version from './version';
 import { MqttBroker } from './broker/mqtt-broker';
-import { v4 as uuidv4 } from 'uuid';
+
 
 let broker: Broker;
 let requestSeq = 0;

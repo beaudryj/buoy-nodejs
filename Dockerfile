@@ -26,6 +26,10 @@ RUN yarn install --non-interactive --frozen-lockfile --production
 # copy built application to runtime image
 FROM node:16-alpine
 WORKDIR /app
+
+# install curl for health checks
+RUN apk add --no-cache curl
+
 COPY --from=build-stage /app/config config
 COPY --from=build-stage /app/lib lib
 COPY --from=build-stage /app/node_modules node_modules

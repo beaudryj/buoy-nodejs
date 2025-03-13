@@ -1,12 +1,19 @@
 import type Logger from 'bunyan'
-import {connect, IClientPublishOptions, MqttClient} from 'mqtt'
+import {connect, IClientOptions, MqttClient} from 'mqtt'
 import {Broker, DeliveryState, SendContext, SendOptions, Updater} from './broker'
 import {CancelError, DeliveryError} from './errors'
 import {Hash, Hasher} from '../hasher'
+import fs from 'fs'
 
 interface MqttBrokerOptions {
     /** MQTT server url. */
     mqtt_url: string
+    /** Client certificate. */
+    mqtt_cert?: string
+    /** Client key. */
+    mqtt_key?: string
+    /** CA certificate. */
+    mqtt_ca?: string
     /** How many seconds to ask server to persist messages for. */
     mqtt_expiry?: number
 }
@@ -29,7 +36,19 @@ export class MqttBroker implements Broker {
     constructor(private options: MqttBrokerOptions, private logger: Logger) {
         this.ended = false
         this.expiry = options.mqtt_expiry || 60 * 30
-        this.client = connect(options.mqtt_url)
+
+        const mqttOptions: IClientOptions = {
+            clientId: `mqtt-client-${Math.random().toString(16).substr(2, 8)}`,
+            rejectUnauthorized: true,
+        }
+
+        if (options.mqtt_cert && options.mqtt_key && options.mqtt_ca) {
+            mqttOptions.cert = Buffer.from(options.mqtt_cert, 'base64')
+            mqttOptions.key = Buffer.from(options.mqtt_key, 'base64')
+            mqttOptions.ca = Buffer.from(options.mqtt_ca, 'base64')
+        }
+
+        this.client = connect(options.mqtt_url, mqttOptions)
         this.client.on('message', this.messageHandler.bind(this))
         this.client.on('close', () => {
             if (!this.ended) {

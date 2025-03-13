@@ -9,3 +9,11 @@ mqtt_expiry = 600 # seconds
 [[log]]
 level = 'info'
 out = 'stdout'
+
+# broker options
+[broker]
+type = 'mqtt'
+mqtt_url = 'mqtts://your-production-mqtt-url:8883'
+mqtt_cert = '/path/to/your/certificate.pem'
+mqtt_key = '/path/to/your/private.key'
+mqtt_ca = '/path/to/your/ca.pem'

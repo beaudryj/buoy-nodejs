@@ -20,7 +20,7 @@ interface Waiter {
     cb: (error?: Error, hash?: Hash) => void;
 }
 
-/** Passes messages and delivery notifications over MQTT. */
+/** Passes messages and delivery notifications over AWS IoT MQTT. */
 export class MqttBroker implements Broker {
     private client: MqttClient;
     private subscribers: Array<{ channel: string; updater: Updater }> = [];
@@ -46,9 +46,9 @@ export class MqttBroker implements Broker {
         fs.writeFileSync(certPath, options.mqtt_cert || '');
         fs.writeFileSync(caPath, options.mqtt_ca || '');
 
-        this.logger.info("Key Path:", keyPath);
-        this.logger.info("Cert Path:", certPath);
-        this.logger.info("CA Path:", caPath);
+        this.logger.info("AWS IoT Key Path:", keyPath);
+        this.logger.info("AWS IoT Cert Path:", certPath);
+        this.logger.info("AWS IoT CA Path:", caPath);
 
         const mqttOptions: IClientOptions = {
             clientId: `mqtt-client-${Math.random().toString(16).substr(2, 8)}`,
@@ -56,30 +56,38 @@ export class MqttBroker implements Broker {
             key: fs.readFileSync(keyPath),
             cert: fs.readFileSync(certPath),
             ca: fs.readFileSync(caPath),
-            reconnectPeriod: 10000, // ⏳ Increase reconnection period to 10 seconds
-            keepalive: 60, // ⏳ Keepalive interval to prevent frequent disconnects
+            reconnectPeriod: 10000, // ⏳ AWS IoT disconnect mitigation (10s reconnection delay)
+            keepalive: 60, // ⏳ AWS IoT requires keepalive to be tuned properly
         };
 
         this.client = connect(options.mqtt_url, mqttOptions);
         this.client.on('message', this.messageHandler.bind(this));
+
         this.client.on('close', () => {
             if (!this.ended) {
-                this.logger.warn('⚠️ Disconnected from MQTT broker');
+                this.logger.warn('⚠️ AWS IoT Disconnected');
             }
         });
+
         this.client.on('connect', () => {
-            this.logger.info('✅ Connected to MQTT broker');
+            this.logger.info('✅ Connected to AWS IoT MQTT!');
+            
+            setTimeout(() => {  // ⏳ AWS IoT requires a delay before subscribing
+                this.subscribeToTopics();
+            }, 2000);
         });
+
         this.client.on('reconnect', () => {
-            this.logger.info('🔄 Attempting MQTT reconnect');
+            this.logger.info('🔄 Attempting AWS IoT Reconnect');
         });
+
         this.client.on('error', (error) => {
-            this.logger.error('❌ MQTT Error:', error);
+            this.logger.error('❌ AWS IoT MQTT Error:', error);
         });
     }
 
     async init() {
-        this.logger.info('📡 Initializing MQTT broker %s', this.options.mqtt_url);
+        this.logger.info('📡 Initializing AWS IoT MQTT Broker %s', this.options.mqtt_url);
         if (!this.client.connected) {
             await new Promise<void>((resolve, reject) => {
                 this.client.once('connect', () => {
@@ -92,11 +100,11 @@ export class MqttBroker implements Broker {
     }
 
     async deinit() {
-        this.logger.debug('📴 MQTT broker deinit');
+        this.logger.debug('📴 AWS IoT MQTT Broker Deinit');
         this.ended = true;
         const cancels: Promise<void>[] = [];
         for (const { hash, channel, cb } of this.waiting) {
-            this.logger.info({ hash, channel }, 'Cancelling waiter');
+            this.logger.info({ hash, channel }, 'Cancelling AWS IoT Message');
             cancels.push(this.sendCancel(channel, hash));
             cb(new CancelError('Shutting down'));
         }
@@ -115,91 +123,36 @@ export class MqttBroker implements Broker {
 
     async healthCheck() {
         if (!this.client.connected) {
-            throw new Error('Lost connection to MQTT broker');
+            throw new Error('Lost connection to AWS IoT MQTT broker');
         }
     }
 
     async send(channel: string, payload: Buffer, options: SendOptions, ctx?: SendContext) {
         const hash = this.hasher.hash(payload);
-        this.logger.debug({ hash, channel }, 'Sending message %s', hash);
-        const cancel = () => {
-            this.sendCancel(channel, hash).catch((error) => {
-                this.logger.warn(error, 'Error during send cancel');
-            });
-        };
-        if (ctx) {
-            ctx.cancel = cancel;
-        }
-        const timeout = (options.wait || 0) * 1000;
-        let deliveryPromise: Promise<void> | undefined;
-        if (timeout > 0) {
-            deliveryPromise = this.waitForDelivery(channel, timeout, hash);
-            deliveryPromise.catch(() => {}); // Prevent unhandled rejection
-        }
+        this.logger.debug({ hash, channel }, 'Sending AWS IoT Message %s', hash);
         await this.publish(`channel/${channel}`, payload, {
-            qos: 2,
-            retain: true,
-            properties: {
-                messageExpiryInterval: this.expiry,
-            },
+            qos: 1, // AWS IoT **only supports QoS 0 and 1**
+            retain: false, // AWS IoT **does NOT support retained messages**
         });
-        let rv = DeliveryState.buffered;
-        if (deliveryPromise) {
-            try {
-                await deliveryPromise;
-                rv = DeliveryState.delivered;
-            } catch (error) {
-                if (ctx) {
-                    ctx.cancel = undefined;
+    }
+
+    private subscribeToTopics() {
+        const topics = ['test/topic', 'buoy/data', 'buoy/status'];
+
+        topics.forEach(topic => {
+            this.client.subscribe(topic, { qos: 1 }, (error) => {
+                if (error) {
+                    this.logger.error(`❌ AWS IoT Subscription error: ${topic}`, error);
+                } else {
+                    this.logger.info(`📥 Subscribed to AWS IoT topic: ${topic}`);
                 }
-                if (error instanceof DeliveryError && options.requireDelivery) {
-                    cancel();
-                    throw error;
-                }
-            }
-        }
-        if (ctx) {
-            ctx.cancel = undefined;
-        }
-        return rv;
+            });
+        });
     }
 
     private async sendCancel(channel: string, hash?: Hash) {
-        await this.publish(`channel/${channel}`, '', { qos: 1, retain: true });
+        await this.publish(`channel/${channel}`, '', { qos: 1 });
         await this.publish(`cancel/${channel}`, hash?.bytes || '', { qos: 1 });
-    }
-
-    private messageHandler(topic: string, payload: Buffer) {
-        const parts = topic.split('/');
-        switch (parts[0]) {
-            case 'delivery':
-                this.handleDelivery(parts[1], payload.byteLength > 0 ? new Hash(payload) : undefined);
-                break;
-            case 'channel':
-                this.handleChannelMessage(parts[1], payload);
-                break;
-            case 'cancel':
-                this.handleCancel(parts[1], payload.byteLength > 0 ? new Hash(payload) : undefined);
-                break;
-            default:
-                this.logger.warn({ topic }, 'Unexpected MQTT message');
-        }
-    }
-
-    private handleChannelMessage(channel: string, payload: Buffer) {
-        if (payload.length === 0) return;
-        const hash = this.hasher.hash(payload);
-        const updaters = this.subscribers.filter((sub) => sub.channel === channel).map((sub) => sub.updater);
-        this.logger.debug({ channel, hash }, 'Updating %d subscription(s)', updaters.length);
-        Promise.allSettled(updaters.map((fn) => fn(payload))).then(() => {
-            this.client.publish(`channel/${channel}`, '', { qos: 1, retain: true });
-            this.client.publish(`delivery/${channel}`, hash.bytes, { qos: 1 });
-        });
-    }
-
-    private handleDelivery(channel: string, hash?: Hash) {
-        this.logger.debug({ channel, hash }, 'Message delivered');
-        this.waiting.filter((item) => item.channel === channel).forEach((waiter) => waiter.cb(undefined, hash));
     }
 
     private async publish(topic: string, payload: string | Buffer, options: IClientPublishOptions = {}) {

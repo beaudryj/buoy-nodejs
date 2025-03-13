@@ -1,9 +1,8 @@
 import type Logger from 'bunyan'
-import {connect, IClientOptions, MqttClient} from 'mqtt'
+import {connect, IClientOptions, IClientPublishOptions, MqttClient} from 'mqtt'
 import {Broker, DeliveryState, SendContext, SendOptions, Updater} from './broker'
 import {CancelError, DeliveryError} from './errors'
 import {Hash, Hasher} from '../hasher'
-import fs from 'fs'
 
 interface MqttBrokerOptions {
     /** MQTT server url. */

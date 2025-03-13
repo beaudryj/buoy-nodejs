@@ -56,8 +56,8 @@ export class MqttBroker implements Broker {
             key: fs.readFileSync(keyPath),
             cert: fs.readFileSync(certPath),
             ca: fs.readFileSync(caPath),
-            reconnectPeriod: 10000, // ⏳ AWS IoT disconnect mitigation (10s reconnection delay)
-            keepalive: 60, // ⏳ AWS IoT requires keepalive to be tuned properly
+            reconnectPeriod: 10000,
+            keepalive: 60,
         };
 
         this.client = connect(options.mqtt_url, mqttOptions);
@@ -71,10 +71,7 @@ export class MqttBroker implements Broker {
 
         this.client.on('connect', () => {
             this.logger.info('✅ Connected to AWS IoT MQTT!');
-            
-            setTimeout(() => {  // ⏳ AWS IoT requires a delay before subscribing
-                this.subscribeToTopics();
-            }, 2000);
+            setTimeout(() => { this.subscribeToTopics(); }, 2000);
         });
 
         this.client.on('reconnect', () => {
@@ -131,14 +128,23 @@ export class MqttBroker implements Broker {
         const hash = this.hasher.hash(payload);
         this.logger.debug({ hash, channel }, 'Sending AWS IoT Message %s', hash);
         await this.publish(`channel/${channel}`, payload, {
-            qos: 1, // AWS IoT **only supports QoS 0 and 1**
-            retain: false, // AWS IoT **does NOT support retained messages**
+            qos: 1,
+            retain: false,
         });
+    }
+
+    async subscribe(channel: string, updater: Updater) {
+        this.logger.debug({ channel }, 'New subscription to AWS IoT topic');
+        const sub = { channel, updater };
+        await this.addSubscriber(sub);
+        return () => {
+            this.logger.debug({ channel }, 'Unsubscribe');
+            this.removeSubscriber(sub);
+        };
     }
 
     private subscribeToTopics() {
         const topics = ['test/topic', 'buoy/data', 'buoy/status'];
-
         topics.forEach(topic => {
             this.client.subscribe(topic, { qos: 1 }, (error) => {
                 if (error) {
@@ -158,6 +164,36 @@ export class MqttBroker implements Broker {
     private async publish(topic: string, payload: string | Buffer, options: IClientPublishOptions = {}) {
         return new Promise<void>((resolve, reject) => {
             this.client.publish(topic, payload, options, (error) => (error ? reject(error) : resolve()));
+        });
+    }
+
+    private waitForDelivery(channel: string, timeout: number, hash: Hash) {
+        return new Promise<void>((resolve, reject) => {
+            this.logger.debug({ channel, hash }, 'Waiting for AWS IoT message delivery');
+
+            const timer = setTimeout(() => {
+                reject(new DeliveryError(`Timed out after ${timeout}ms`));
+            }, timeout);
+
+            const waiter: Waiter = {
+                channel,
+                hash,
+                cb: (error?: Error, result?: Hash) => {
+                    clearTimeout(timer);
+                    if (error) reject(error);
+                    else resolve();
+                },
+            };
+            this.waiting.push(waiter);
+        });
+    }
+
+    private handleCancel(channel: string, hash?: Hash) {
+        this.logger.debug({ channel, hash }, 'AWS IoT message canceled');
+        this.waiting.filter((item) => item.channel === channel).forEach((waiter) => {
+            if (!hash || waiter.hash.equals(hash)) {
+                waiter.cb(new CancelError('Cancel from another sender'));
+            }
         });
     }
 }

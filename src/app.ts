@@ -17,7 +17,15 @@ import setupBroker, {
 } from './broker';
 import version from './version';
 import { MqttBroker } from './broker/mqtt-broker';
+import { v4 as uuidv4 } from 'uuid';
 
+const mqttOptions = {
+    mqtt_url: config.get('mqtt_url'),
+    mqtt_cert: config.get('mqtt_cert'),
+    mqtt_key: config.get('mqtt_key'),
+    mqtt_ca: config.get('mqtt_ca'),
+    mqtt_expiry: config.get('mqtt_expiry')
+};
 
 let broker: Broker;
 let requestSeq = 0;

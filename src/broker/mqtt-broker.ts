@@ -51,6 +51,14 @@ export class MqttBroker implements Broker {
         fs.writeFileSync(certPath, options.mqtt_cert || '');
         fs.writeFileSync(caPath, options.mqtt_ca || '');
 
+        // Log the file paths and contents for debugging
+        this.logger.info("Key Path:", keyPath);
+        this.logger.info("Cert Path:", certPath);
+        this.logger.info("CA Path:", caPath);
+        this.logger.info("Key Content:", fs.readFileSync(keyPath, 'utf-8'));
+        this.logger.info("Cert Content:", fs.readFileSync(certPath, 'utf-8'));
+        this.logger.info("CA Content:", fs.readFileSync(caPath, 'utf-8'));
+
         const mqttOptions: IClientOptions = {
             clientId: `mqtt-client-${Math.random().toString(16).substr(2, 8)}`,
             rejectUnauthorized: true,

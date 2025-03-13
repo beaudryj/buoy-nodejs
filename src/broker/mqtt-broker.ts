@@ -3,6 +3,8 @@ import {connect, IClientOptions, IClientPublishOptions, MqttClient} from 'mqtt'
 import {Broker, DeliveryState, SendContext, SendOptions, Updater} from './broker'
 import {CancelError, DeliveryError} from './errors'
 import {Hash, Hasher} from '../hasher'
+import fs from 'fs'
+import path from 'path'
 
 interface MqttBrokerOptions {
     /** MQTT server url. */
@@ -36,15 +38,25 @@ export class MqttBroker implements Broker {
         this.ended = false
         this.expiry = options.mqtt_expiry || 60 * 30
 
+        const CERTS_DIR = "/tmp/certs";
+        if (!fs.existsSync(CERTS_DIR)) {
+            fs.mkdirSync(CERTS_DIR, { recursive: true });
+        }
+
+        const keyPath = path.join(CERTS_DIR, "private.key");
+        const certPath = path.join(CERTS_DIR, "certificate.pem");
+        const caPath = path.join(CERTS_DIR, "AmazonRootCA1.pem");
+
+        fs.writeFileSync(keyPath, options.mqtt_key || '');
+        fs.writeFileSync(certPath, options.mqtt_cert || '');
+        fs.writeFileSync(caPath, options.mqtt_ca || '');
+
         const mqttOptions: IClientOptions = {
             clientId: `mqtt-client-${Math.random().toString(16).substr(2, 8)}`,
             rejectUnauthorized: true,
-        }
-
-        if (options.mqtt_cert && options.mqtt_key && options.mqtt_ca) {
-            mqttOptions.cert = Buffer.from(options.mqtt_cert, 'base64').toString('utf-8')
-            mqttOptions.key = Buffer.from(options.mqtt_key, 'base64').toString('utf-8')
-            mqttOptions.ca = Buffer.from(options.mqtt_ca, 'base64').toString('utf-8')
+            key: fs.readFileSync(keyPath),
+            cert: fs.readFileSync(certPath),
+            ca: fs.readFileSync(caPath)
         }
 
         this.client = connect(options.mqtt_url, mqttOptions)

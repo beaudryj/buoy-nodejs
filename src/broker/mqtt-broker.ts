@@ -5,6 +5,7 @@ import {CancelError, DeliveryError} from './errors'
 import {Hash, Hasher} from '../hasher'
 import fs from 'fs'
 import path from 'path'
+import { v4 as uuidv4 } from 'uuid'
 
 interface MqttBrokerOptions {
     /** MQTT server url. */
@@ -25,6 +26,8 @@ interface Waiter {
     cb: (error?: Error, hash?: Hash) => void
 }
 
+let instance: MqttBroker | null = null;
+
 /** Passes messages and delivery notifications over MQTT. */
 export class MqttBroker implements Broker {
     private client: MqttClient
@@ -34,7 +37,14 @@ export class MqttBroker implements Broker {
     private ended: boolean
     private hasher = new Hasher()
 
-    constructor(private options: MqttBrokerOptions, private logger: Logger) {
+    static getInstance(options: MqttBrokerOptions, logger: Logger): MqttBroker {
+        if (!instance) {
+            instance = new MqttBroker(options, logger);
+        }
+        return instance;
+    }
+
+    private constructor(private options: MqttBrokerOptions, private logger: Logger) {
         this.ended = false
         this.expiry = options.mqtt_expiry || 60 * 30
 
@@ -60,13 +70,17 @@ export class MqttBroker implements Broker {
         this.logger.info("CA Content:", fs.readFileSync(caPath, 'utf-8'));
 
         const mqttOptions: IClientOptions = {
-            clientId: `mqtt-client-${Math.random().toString(16).substr(2, 8)}`,
+            clientId: `mqtt-client-${uuidv4()}`,
             rejectUnauthorized: true,
             key: fs.readFileSync(keyPath),
             cert: fs.readFileSync(certPath),
             ca: fs.readFileSync(caPath),
+            clean: false, // Persistent session
             reconnectPeriod: 10000,  // Increase to 10 seconds
             keepalive: 60,           // Extend keepalive to prevent frequent drops
+            properties: {
+                sessionExpiryInterval: 3600 // 1 hour
+            }
         }
 
         this.client = connect(options.mqtt_url, mqttOptions)
@@ -97,6 +111,9 @@ export class MqttBroker implements Broker {
         })
         this.client.on('error', (error) => {
             this.logger.error("❌ MQTT Error:", error);
+            if (error.message.includes("client ID already in use")) {
+                this.logger.error("⚠️ Client ID conflict detected. Ensure uniqueness.");
+            }
             this.logger.error(error.stack);
         })
     }

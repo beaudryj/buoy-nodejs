@@ -16,6 +16,8 @@ import setupBroker, {
     Unsubscriber,
 } from './broker';
 import version from './version';
+import { MqttBroker } from './broker/mqtt-broker';
+import { v4 as uuidv4 } from 'uuid';
 
 let broker: Broker;
 let requestSeq = 0;
@@ -235,6 +237,7 @@ async function handlePost(
         }
     }
     try {
+        const broker = MqttBroker.getInstance(mqttOptions, log);
         const delivery = await broker.send(uuid, data, { wait, requireDelivery }, ctx);
         response.setHeader('X-Buoy-Delivery', delivery);
         log.info({ delivery }, 'message dispatched');

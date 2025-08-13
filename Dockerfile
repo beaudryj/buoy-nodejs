@@ -26,13 +26,6 @@ RUN yarn install --non-interactive --frozen-lockfile --production
 # copy built application to runtime image
 FROM node:16-alpine
 WORKDIR /app
-
-# Copy the startup script
-COPY startup.sh /usr/local/bin/startup.sh
-
-# install curl for health checks
-RUN apk add --no-cache curl
-
 COPY --from=build-stage /app/config config
 COPY --from=build-stage /app/lib lib
 COPY --from=build-stage /app/node_modules node_modules
@@ -40,5 +33,5 @@ COPY --from=build-stage /app/node_modules node_modules
 # setup default env
 ENV NODE_ENV production
 
-# Use the startup script as the entry point
-ENTRYPOINT ["sh", "/usr/local/bin/startup.sh"]
+# app entrypoint
+CMD [ "node", "lib/app.js" ]

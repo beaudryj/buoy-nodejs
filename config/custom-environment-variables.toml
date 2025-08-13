@@ -3,8 +3,3 @@ num_workers = 'NUM_WORKERS'
 [log]
 __name = 'LOG_STREAMS'
 __format = 'json'
-[broker]
-mqtt_url = "MQTT_URL"
-mqtt_cert = "IOT_CERTIFICATE"
-mqtt_key = "IOT_PRIVATE_KEY"
-mqtt_ca = "AWS_IOT_CA_CERT"

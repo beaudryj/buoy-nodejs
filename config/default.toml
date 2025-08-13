@@ -17,10 +17,6 @@ status_interval = 60 # seconds
 type = 'memory'
 memory_max_age = 3600 # seconds
 memory_max_size = 500 # megabytes
-mqtt_url = ''
-mqtt_cert = ''
-mqtt_key = ''
-mqtt_ca = ''
 
 # logging output, can be repeated
 [[log]]

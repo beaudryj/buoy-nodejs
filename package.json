@@ -11,7 +11,6 @@
     "lru-cache": "^6.0.0",
     "mqtt": "^4.2.6",
     "toml": "2.x",
-    "uuid": "^11.1.0",
     "ws": "^8.0.0",
     "xxhash-addon": "^1.4.0"
   },
@@ -20,7 +19,6 @@
     "@types/config": "^0.0.39",
     "@types/lru-cache": "^5.1.0",
     "@types/node": "^16.3.0",
-    "@types/uuid": "^10.0.0",
     "@types/ws": "^7.2.7",
     "@typescript-eslint/eslint-plugin": "^4.14.0",
     "@typescript-eslint/parser": "^4.14.0",

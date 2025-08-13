@@ -9,6 +9,7 @@
         "outDir": "lib",
         "strict": true,
         "target": "esnext",
+        "skipLibCheck": true,
         "typeRoots": [
             "./src/types",
             "./node_modules/@types",

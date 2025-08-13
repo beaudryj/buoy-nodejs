@@ -1,5 +1,20 @@
 port = 'PORT'
 num_workers = 'NUM_WORKERS'
+
+act_as_proxy = 'ACT_AS_PROXY'
+
+[broker]
+mqtt_url = 'BROKER_MQTT_URL'
+
+mqtt_auth_key = 'BROKER_MQTT_AUTH_KEY'
+mqtt_auth_cert = 'BROKER_MQTT_AUTH_CERT'
+mqtt_auth_ca = 'BROKER_MQTT_AUTH_CA'
+
+mqtt_auth_folder = 'BROKER_MQTT_AUTH_FOLDER'
+mqtt_auth_key_file = 'BROKER_MQTT_AUTH_KEY_FILE'
+mqtt_auth_cert_file = 'BROKER_MQTT_AUTH_CERT_FILE'
+mqtt_auth_ca_file = 'BROKER_MQTT_AUTH_CA_FILE'
+
 [log]
 __name = 'LOG_STREAMS'
 __format = 'json'

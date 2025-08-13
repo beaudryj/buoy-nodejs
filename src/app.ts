@@ -1,8 +1,9 @@
-import {URL} from 'url'
+import { URL } from 'url'
 import * as http from 'http'
+import * as https from 'https'
 import * as os from 'os'
-import * as WebSocket from 'ws'
-import cluster, {Worker} from 'cluster'
+import WebSocket from 'ws'
+import cluster, { Worker } from 'cluster'
 import config from 'config'
 import type Logger from 'bunyan'
 
@@ -14,158 +15,27 @@ import setupBroker, {
     DeliveryState,
     SendContext,
     Unsubscriber,
+    Updater,
 } from './broker'
 import version from './version'
+import { getUUID, HttpError, readBody } from './utils'
+import { Status } from './interfaces'
+import { Connection } from './connection'
+import { Hash } from './hasher'
 
 let broker: Broker
 let requestSeq = 0
 let activeRequests = 0
+
+let actAsProxy = false
+
 const connections: Connection[] = []
 
-const HEARTBEAT_INTERVAL = 10 * 1000
+const BUOY_SERVICE = 'cb.anchor.link'
 
-/** A WebSocket connection. */
-class Connection {
-    static seq = 0
+type UpdaterWithType = (payload: Buffer, type: string) => Promise<void>
 
-    alive: boolean
-    closed: boolean
-    id: number
-    version: number
-
-    private cleanupCallback: () => void
-    private socket: WebSocket
-    private timer: NodeJS.Timeout
-    private log: typeof logger
-
-    /**
-     * Simple ACK protocol, like STOMP but simpler and using binary frames instead of text.
-     *
-     * Format: 0x4242<type>[payload]
-     *
-     * For version 2 clients the server will add a 0x4242<type> header to all messages sent.
-     *
-     * When a message is delivered with 0x424201<seq><payload> the client send back a
-     * 0x424202<seq> to acknowledge receiving the message.
-     */
-    private ackSeq = 0
-    private ackWaiting: {[seq: number]: () => void} = {}
-
-    constructor(socket: WebSocket, version: number, cleanup: () => void) {
-        this.id = ++Connection.seq
-        this.log = logger.child({conn: this.id})
-        this.socket = socket
-        this.closed = false
-        this.alive = true
-        this.cleanupCallback = cleanup
-        this.version = version
-        this.socket.on('close', () => {
-            this.didClose()
-        })
-        this.socket.on('message', (data: any, isBinary: boolean) => {
-            if (!isBinary) data = Buffer.from(data, 'utf8')
-            this.handleMessage(data)
-        })
-        this.socket.on('pong', () => {
-            this.alive = true
-        })
-        this.socket.on('error', (error) => {
-            this.log.warn(error, 'socket error')
-        })
-        this.timer = setInterval(() => {
-            if (this.alive) {
-                this.alive = false
-                this.socket.ping()
-            } else {
-                this.destroy()
-            }
-        }, HEARTBEAT_INTERVAL)
-    }
-
-    private didClose() {
-        this.log.debug({alive: this.alive, closed: this.closed}, 'did close')
-        this.alive = false
-        clearTimeout(this.timer)
-        if (this.closed === false) {
-            this.cleanupCallback()
-        }
-        this.closed = true
-    }
-
-    async send(data: Buffer) {
-        if (this.closed) {
-            throw new Error('Socket closed')
-        }
-        if (this.version === 2) {
-            await this.ackSend(data)
-        } else {
-            this.log.debug({size: data.byteLength}, 'send data')
-            this.socket.send(data)
-        }
-    }
-
-    close(code?: number, reason?: string) {
-        this.socket.close(code, reason)
-        this.didClose()
-    }
-
-    destroy() {
-        this.socket.terminate()
-        this.didClose()
-    }
-
-    private handleMessage(data: Buffer) {
-        if (data[0] !== 0x42 || data[1] !== 0x42) return
-        const type = data[2]
-        this.log.debug({type}, 'command message')
-        switch (type) {
-            case 0x02: {
-                const seq = data[3]
-                const callback = this.ackWaiting[seq]
-                if (callback) {
-                    callback()
-                }
-                break
-            }
-        }
-    }
-
-    private async ackSend(data: Buffer) {
-        const seq = ++this.ackSeq % 255
-        this.log.debug({size: data.byteLength, seq}, 'ack send data')
-        const header = Buffer.from([0x42, 0x42, 0x01, seq])
-        data = Buffer.concat([header, data])
-        this.socket.send(data)
-        return await this.waitForAck(seq)
-    }
-
-    private waitForAck(seq: number, timeout = 5000) {
-        return new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-                delete this.ackWaiting[seq]
-                reject(new Error('Timed out waiting for ACK'))
-                this.destroy()
-            }, timeout)
-            this.ackWaiting[seq] = () => {
-                this.log.debug({seq}, 'got ack')
-                clearTimeout(timer)
-                delete this.ackWaiting[seq]
-                resolve()
-            }
-        })
-    }
-}
-
-function getUUID(request: http.IncomingMessage) {
-    const url = new URL(request.url || '', 'http://localhost')
-    const uuid = url.pathname.slice(1)
-    if (uuid.length < 10) {
-        throw new HttpError('Invalid channel name', 400)
-    }
-    return uuid
-}
-
-async function handleConnection(socket: WebSocket, request: http.IncomingMessage) {
+async function handleWSConnection(socket: WebSocket, request: http.IncomingMessage) {
     const uuid = getUUID(request)
     let version = 1
     if (request.url) {
@@ -173,37 +43,110 @@ async function handleConnection(socket: WebSocket, request: http.IncomingMessage
         version = Number.parseInt(query.get('v') || '') || 1
     }
     let unsubscribe: Unsubscriber | null = null
+    let unsubscribeBuoy: Unsubscriber | null = null
     let prematureClose = false
     const connection = new Connection(socket, version, () => {
         log.debug('connection closed')
+        let unsubscribeDone = 0
         if (unsubscribe) {
+            unsubscribeDone++
             unsubscribe()
-        } else {
+        }
+        if (unsubscribeBuoy) {
+            unsubscribeDone++
+            unsubscribeBuoy()
+        }
+
+        if (unsubscribeDone !== 2) {
             prematureClose = true
         }
+
         connections.splice(connections.indexOf(connection), 1)
     })
     connections.push(connection)
-    const log = logger.child({uuid, conn: connection.id})
+    const log = logger.child({ uuid, conn: connection.id })
+
     log.debug('new connection')
+
+    const updater: UpdaterWithType = createUpdater(connection, log)
+
     unsubscribe = await broker.subscribe(uuid, async (data) => {
-        log.debug('delivering payload')
-        try {
-            await connection.send(data)
-        } catch (error) {
-            log.info(error, 'failed to deliver payload')
-            throw error
-        }
-        log.info('payload delivered')
+        updater(data, 'broker')
     })
+
+    if (actAsProxy) {
+        unsubscribeBuoy = await listenToBuoy(uuid, log, async (data) => {
+            updater(data, 'buoy')
+        })
+    }
+
     if (prematureClose) {
-        unsubscribe()
+        if (unsubscribe) {
+            unsubscribe()
+        }
+        if (unsubscribeBuoy) {
+            unsubscribeBuoy()
+        }
     }
 }
 
-class HttpError extends Error {
-    constructor(message: string, readonly statusCode: number) {
-        super(message)
+function createUpdater(connection: Connection, log: Logger): UpdaterWithType {
+    let hashSet: { hash: Hash; delivered: number }[] = []
+
+    const cleanHashSet = (delivered: number) => {
+        hashSet = hashSet.filter((_) => delivered - _.delivered <= (2 * 60 + 10) * 1000)
+    }
+
+    return async (data, type) => {
+        log.debug('delivering payload using', type)
+        const hash = data.byteLength > 0 ? new Hash(data) : undefined
+        if (hash) {
+            cleanHashSet(Date.now())
+
+            if (!hashSet.some((_) => _.hash.equals(hash))) {
+                hashSet.push({ hash, delivered: Date.now() })
+                try {
+                    await connection.send(data)
+                } catch (error) {
+                    log.info(error, 'failed to deliver payload')
+                    throw error
+                }
+                log.info('payload delivered')
+            } else {
+                log.info('payload was already delivered')
+            }
+        }
+    }
+}
+
+async function listenToBuoy(uuid: string, log: Logger, updater: Updater): Promise<Unsubscriber> {
+    log.debug(
+        { url: `wss://${BUOY_SERVICE}/${uuid}`, channel: uuid },
+        'start listening proxy websocket'
+    )
+
+    const ws = new WebSocket(`wss://${BUOY_SERVICE}/${uuid}`)
+
+    ws.on('open', () => {
+        log.debug({ channel: uuid }, 'successfully opened proxy websocket connection')
+    })
+
+    ws.on('error', (e) => {
+        log.error(e, 'problem with proxy websocket connection')
+    })
+
+    ws.on('message', async (data: any, isBinary: boolean) => {
+        if (!isBinary) data = Buffer.from(data, 'utf8')
+        updater(data)
+    })
+
+    ws.on('close', () => {
+        log.debug({ channel: uuid }, 'successfully unsubscribed from proxy websocket connection')
+    })
+
+    return () => {
+        log.debug({ channel: uuid }, 'unsubscribe from proxy websocket connection')
+        ws.close()
     }
 }
 
@@ -213,7 +156,7 @@ async function handlePost(
     log: Logger
 ) {
     const uuid = getUUID(request)
-    log = log.child({uuid})
+    log = log.child({ uuid })
     const data = await readBody(request)
     if (data.byteLength === 0) {
         throw new HttpError('Unable to forward empty message', 400)
@@ -225,6 +168,7 @@ async function handlePost(
             ctx.cancel()
         }
     })
+
     const waitHeader = request.headers['x-buoy-wait'] || request.headers['x-buoy-soft-wait']
     const requireDelivery = !!request.headers['x-buoy-wait']
     let wait = 0
@@ -234,10 +178,19 @@ async function handlePost(
             throw new HttpError('Invalid wait timeout', 400)
         }
     }
+
+    const sendToBroker = async () => await broker.send(uuid, data, { wait, requireDelivery }, ctx)
+
+    const promisesToTrack: Promise<DeliveryState>[] = [sendToBroker()]
+
+    if (actAsProxy) {
+        promisesToTrack.push(forwardPostRequest(uuid, data, request, log))
+    }
+
     try {
-        const delivery = await broker.send(uuid, data, {wait, requireDelivery}, ctx)
+        const delivery = await Promise.race(promisesToTrack)
         response.setHeader('X-Buoy-Delivery', delivery)
-        log.info({delivery}, 'message dispatched')
+        log.info({ delivery }, 'message dispatched')
         if (wait > 0 && delivery == DeliveryState.buffered) {
             return 202
         }
@@ -250,16 +203,59 @@ async function handlePost(
     }
 }
 
-function readBody(request: http.IncomingMessage) {
-    return new Promise<Buffer>((resolve, reject) => {
-        const chunks: Buffer[] = []
-        request.on('error', reject)
-        request.on('data', (chunk) => {
-            chunks.push(chunk)
+function forwardPostRequest<T>(
+    uuid: string,
+    body: T,
+    request: http.IncomingMessage,
+    log: Logger,
+    ctx?: SendContext
+): Promise<DeliveryState> {
+    return new Promise((resolve, reject) => {
+        const headers: https.RequestOptions['headers'] = {}
+        if (request.headers['x-buoy-wait']) {
+            headers['x-buoy-wait'] = request.headers['x-buoy-wait']
+        }
+
+        if (request.headers['x-buoy-soft-wait']) {
+            headers['x-buoy-soft-wait'] = request.headers['x-buoy-soft-wait']
+        }
+
+        const options: https.RequestOptions = {
+            host: BUOY_SERVICE,
+            port: 443,
+            path: `/${uuid}`,
+            method: 'POST',
+            headers: headers,
+        }
+
+        const cbAnchorRequest = https.request(options, (res) => {
+            res.setEncoding('utf8')
+
+            res.on('data', (chunk) => {
+                log.info({ body: chunk }, 'forwarded request data dispatched')
+            })
+
+            res.on('end', () => {
+                const delivery = res.headers['X-Buoy-Delivery'] as DeliveryState
+                log.info({ delivery }, 'forwarded request sent')
+
+                resolve(delivery)
+            })
         })
-        request.on('end', () => {
-            resolve(Buffer.concat(chunks))
+
+        if (ctx) {
+            ctx.cancel = () => {
+                log.warn('Cancel sending forwarded request')
+                cbAnchorRequest.destroy(new HttpError('Request canceled', 410))
+            }
+        }
+
+        cbAnchorRequest.on('error', (e) => {
+            log.error(e, 'problem with forwarded request')
+            reject(e)
         })
+        cbAnchorRequest.write(body)
+        cbAnchorRequest.end()
     })
 }
 
@@ -297,7 +293,7 @@ function handleRequest(request: http.IncomingMessage, response: http.ServerRespo
         return
     }
     activeRequests++
-    const log = logger.child({req: ++requestSeq})
+    const log = logger.child({ req: ++requestSeq })
     handlePost(request, response, log)
         .then((status) => {
             response.statusCode = status || 200
@@ -327,7 +323,7 @@ function handleRequest(request: http.IncomingMessage, response: http.ServerRespo
 
 async function setup(port: number) {
     const httpServer = http.createServer(handleRequest)
-    const websocketServer = new WebSocket.Server({server: httpServer})
+    const websocketServer = new WebSocket.Server({ server: httpServer })
     broker = await setupBroker()
     await new Promise<void>((resolve, reject) => {
         httpServer.listen(port, resolve)
@@ -335,7 +331,7 @@ async function setup(port: number) {
     })
 
     websocketServer.on('connection', (socket, request) => {
-        handleConnection(socket as any, request).catch((error) => {
+        handleWSConnection(socket as any, request).catch((error) => {
             logger.error(error, 'error handling websocket connection')
             socket.close()
         })
@@ -356,20 +352,20 @@ async function setup(port: number) {
     }
 }
 
-interface Status {
-    activeConnections: number
-    activeRequests: number
-    numConnections: number
-    numRequests: number
-}
-
 export async function main() {
     const port = Number.parseInt(config.get('port'))
+
+    actAsProxy = config.has('act_as_proxy')
+
+    logger.info(
+        actAsProxy ? `acting as a proxy for ${BUOY_SERVICE}` : 'acting as a standalone service'
+    )
+
     if (!Number.isFinite(port)) {
         throw new Error('Invalid port number')
     }
     if (cluster.isPrimary) {
-        logger.info({version}, 'starting')
+        logger.info({ version }, 'starting')
     }
     let numWorkers = Number.parseInt(config.get('num_workers'), 10)
     if (numWorkers === 0) {
@@ -427,11 +423,11 @@ export async function main() {
         try {
             teardown = await setup(port)
             if (process.send) {
-                process.send({ready: true})
+                process.send({ ready: true })
             }
         } catch (error) {
             if (process.send) {
-                process.send({error: error.message || String(error)})
+                process.send({ error: (error as Error).message || String(error) })
             }
             throw error
         }
@@ -444,7 +440,7 @@ export async function main() {
                     numRequests: requestSeq,
                 }
                 if (process.send) {
-                    process.send({status})
+                    process.send({ status })
                 } else {
                     logger.info(status, 'status')
                 }
@@ -481,7 +477,7 @@ export async function main() {
     })
 
     if (cluster.isPrimary) {
-        logger.info({port}, 'server running')
+        logger.info({ port }, 'server running')
     }
 }
 

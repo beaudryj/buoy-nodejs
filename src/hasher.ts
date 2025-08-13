@@ -1,4 +1,4 @@
-import {XXHash3} from 'xxhash-addon'
+import { XXHash3 } from 'xxhash-addon'
 
 export class Hash {
     constructor(readonly bytes: Buffer) {}

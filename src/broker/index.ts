@@ -2,13 +2,14 @@ import config from 'config'
 import cluster from 'cluster'
 
 import baseLogger from '../logger'
-import {Broker} from './broker'
+import { Broker } from './broker'
 
-import {MemoryBroker} from './memory-broker'
-import {MqttBroker} from './mqtt-broker'
+import { MemoryBroker } from './memory-broker'
+import { MqttBroker } from './mqtt-broker'
+import { MqttAWSBroker } from './mqtt-aws-broker'
 
 async function setupBroker() {
-    const logger = baseLogger.child({module: 'broker'})
+    const logger = baseLogger.child({ module: 'broker' })
     const brokerConf = config.get('broker') as any
     logger.debug('using %s broker', brokerConf.type)
 
@@ -23,6 +24,9 @@ async function setupBroker() {
             break
         case 'mqtt':
             broker = new MqttBroker(brokerConf, logger)
+            break
+        case 'mqtt_aws':
+            broker = new MqttAWSBroker(brokerConf, logger)
             break
         default:
             throw new Error(`Unknown broker type ${brokerConf.type}`)

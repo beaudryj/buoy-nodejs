@@ -1,0 +1,16 @@
+num_workers = 1
+
+# broker options
+[broker]
+type = 'mqtt_aws'
+mqtt_url = ''
+mqtt_expiry = 600 # seconds
+mqtt_publish_qos = 1
+mqtt_auth_folder = './certs'
+mqtt_auth_key_file = 'private.key'
+mqtt_auth_cert_file = 'certificate.pem.crt'
+mqtt_auth_ca_file = 'AmazonRootCA1.pem'
+
+[[log]]
+level = 'debug'
+out = 'stdout'

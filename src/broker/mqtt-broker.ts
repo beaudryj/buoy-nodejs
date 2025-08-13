@@ -1,14 +1,16 @@
 import type Logger from 'bunyan'
-import {connect, IClientPublishOptions, MqttClient} from 'mqtt'
-import {Broker, DeliveryState, SendContext, SendOptions, Updater} from './broker'
-import {CancelError, DeliveryError} from './errors'
-import {Hash, Hasher} from '../hasher'
+import { connect, IClientPublishOptions, MqttClient, QoS } from 'mqtt'
+import { Broker, DeliveryState, SendContext, SendOptions, Updater } from './broker'
+import { CancelError, DeliveryError } from './errors'
+import { Hash, Hasher } from '../hasher'
 
-interface MqttBrokerOptions {
+export interface MqttBrokerOptions {
     /** MQTT server url. */
     mqtt_url: string
     /** How many seconds to ask server to persist messages for. */
     mqtt_expiry?: number
+
+    mqtt_publish_qos?: QoS
 }
 
 interface Waiter {
@@ -18,18 +20,20 @@ interface Waiter {
 }
 
 /** Passes messages and delivery notifications over MQTT. */
-export class MqttBroker implements Broker {
+export class MqttBroker<T extends MqttBrokerOptions> implements Broker {
     private client: MqttClient
-    private subscribers: Array<{channel: string; updater: Updater}> = []
+    private subscribers: Array<{ channel: string; updater: Updater }> = []
     private waiting: Array<Waiter> = []
     private expiry: number
+    private mqtt_publish_qos: QoS
     private ended: boolean
     private hasher = new Hasher()
 
-    constructor(private options: MqttBrokerOptions, private logger: Logger) {
+    constructor(protected options: T, private logger: Logger) {
         this.ended = false
         this.expiry = options.mqtt_expiry || 60 * 30
-        this.client = connect(options.mqtt_url)
+        this.mqtt_publish_qos = options.mqtt_publish_qos || 2
+        this.client = this.createClient()
         this.client.on('message', this.messageHandler.bind(this))
         this.client.on('close', () => {
             if (!this.ended) {
@@ -61,8 +65,8 @@ export class MqttBroker implements Broker {
         this.logger.debug('mqtt broker deinit')
         this.ended = true
         const cancels: Promise<void>[] = []
-        for (const {hash, channel, cb} of this.waiting) {
-            this.logger.info({hash, channel}, 'cancelling waiter')
+        for (const { hash, channel, cb } of this.waiting) {
+            this.logger.info({ hash, channel }, 'cancelling waiter')
             cancels.push(this.sendCancel(channel, hash))
             cb(new CancelError('Shutting down'))
         }
@@ -87,7 +91,7 @@ export class MqttBroker implements Broker {
 
     async send(channel: string, payload: Buffer, options: SendOptions, ctx?: SendContext) {
         const hash = this.hasher.hash(payload)
-        this.logger.debug({hash, channel}, 'send %s', hash)
+        this.logger.debug({ hash, channel }, 'send %s', hash)
         const cancel = () => {
             this.sendCancel(channel, hash).catch((error) => {
                 this.logger.warn(error, 'error during send cancel')
@@ -105,7 +109,7 @@ export class MqttBroker implements Broker {
             deliveryPromise.catch(() => {}) // eslint-disable-line @typescript-eslint/no-empty-function
         }
         await this.publish(`channel/${channel}`, payload, {
-            qos: 2,
+            qos: this.mqtt_publish_qos,
             retain: true,
             properties: {
                 messageExpiryInterval: this.expiry,
@@ -137,19 +141,23 @@ export class MqttBroker implements Broker {
     }
 
     async subscribe(channel: string, updater: Updater) {
-        this.logger.debug({channel}, 'new subscription')
-        const sub = {channel, updater}
+        this.logger.debug({ channel }, 'new subscription')
+        const sub = { channel, updater }
         await this.addSubscriber(sub)
         return () => {
-            this.logger.debug({channel}, 'unsubscribe')
+            this.logger.debug({ channel }, 'unsubscribe')
             this.removeSubscriber(sub)
         }
+    }
+
+    protected createClient() {
+        return connect(this.options.mqtt_url)
     }
 
     private async sendCancel(channel: string, hash?: Hash) {
         // clear channel
         const clear = new Promise<void>((resolve, reject) => {
-            this.client.publish(`channel/${channel}`, '', {qos: 1, retain: true}, (error) => {
+            this.client.publish(`channel/${channel}`, '', { qos: 1, retain: true }, (error) => {
                 if (error) {
                     reject(error)
                 } else {
@@ -159,7 +167,7 @@ export class MqttBroker implements Broker {
         })
         // tell other pending sends that we cancelled
         const tell = new Promise<void>((resolve, reject) => {
-            this.client.publish(`cancel/${channel}`, hash?.bytes || '', {qos: 1}, (error) => {
+            this.client.publish(`cancel/${channel}`, hash?.bytes || '', { qos: 1 }, (error) => {
                 if (error) {
                     reject(error)
                 } else {
@@ -189,7 +197,7 @@ export class MqttBroker implements Broker {
                 this.handleWait(parts[1], new Hash(payload))
                 break
             default:
-                this.logger.warn({topic}, 'unexpected message')
+                this.logger.warn({ topic }, 'unexpected message')
         }
     }
 
@@ -201,15 +209,15 @@ export class MqttBroker implements Broker {
         const updaters = this.subscribers
             .filter((sub) => sub.channel === channel)
             .map((sub) => sub.updater)
-        this.logger.debug({channel, hash}, 'updating %d subscription(s)', updaters.length)
+        this.logger.debug({ channel, hash }, 'updating %d subscription(s)', updaters.length)
         Promise.allSettled(updaters.map((fn) => fn(payload)))
             .then((results) => results.some((result) => result.status === 'fulfilled'))
             .then((delivered) => {
                 if (delivered) {
                     // clear retained message so it's not re-delivered
-                    this.client.publish(`channel/${channel}`, '', {qos: 1, retain: true})
+                    this.client.publish(`channel/${channel}`, '', { qos: 1, retain: true })
                     // tell waiting sends that we delivered
-                    this.client.publish(`delivery/${channel}`, hash.bytes, {qos: 1})
+                    this.client.publish(`delivery/${channel}`, hash.bytes, { qos: 1 })
                 }
             })
             .catch((error) => {
@@ -218,7 +226,7 @@ export class MqttBroker implements Broker {
     }
 
     private handleDelivery(channel: string, hash?: Hash) {
-        this.logger.debug({channel, hash}, 'delivery')
+        this.logger.debug({ channel, hash }, 'delivery')
         const waiters = this.waiting.filter((item) => item.channel === channel)
         for (const waiter of waiters) {
             waiter.cb(undefined, hash)
@@ -226,7 +234,7 @@ export class MqttBroker implements Broker {
     }
 
     private handleCancel(channel: string, hash?: Hash) {
-        this.logger.debug({channel, hash}, 'cancel')
+        this.logger.debug({ channel, hash }, 'cancel')
         const waiters = this.waiting.filter((item) => item.channel === channel)
         for (const waiter of waiters) {
             if (!hash || waiter.hash.equals(hash)) {
@@ -236,7 +244,7 @@ export class MqttBroker implements Broker {
     }
 
     private handleWait(channel: string, hash: Hash) {
-        this.logger.debug({channel, hash}, 'wait')
+        this.logger.debug({ channel, hash }, 'wait')
         const waiters = this.waiting.filter((item) => item.channel === channel)
         for (const waiter of waiters) {
             if (!waiter.hash.equals(hash)) {
@@ -247,13 +255,13 @@ export class MqttBroker implements Broker {
 
     private waitForDelivery(channel: string, timeout: number, hash: Hash) {
         return new Promise<void>((resolve, reject) => {
-            this.logger.debug({channel, hash}, 'wait for delivery')
+            this.logger.debug({ channel, hash }, 'wait for delivery')
             const topics = [`delivery/${channel}`, `cancel/${channel}`, `wait/${channel}`]
             const cleanup = () => {
                 clearTimeout(timer)
                 this.waiting.splice(this.waiting.indexOf(waiter), 1)
                 const lastWaiter = this.waiting.findIndex((item) => item.channel === channel) === -1
-                this.logger.debug({channel, hash, lastWaiter}, 'delivery wait cleanup')
+                this.logger.debug({ channel, hash, lastWaiter }, 'delivery wait cleanup')
                 if (lastWaiter) {
                     this.client.unsubscribe(topics, (error: any) => {
                         if (error) {
@@ -262,13 +270,13 @@ export class MqttBroker implements Broker {
                     })
                 }
             }
-            this.client.subscribe(topics, {qos: 1}, (error) => {
+            this.client.subscribe(topics, { qos: 1 }, (error) => {
                 if (error) {
                     cleanup()
                     reject(error)
                 }
             })
-            this.client.publish(`wait/${channel}`, hash.bytes, {qos: 1})
+            this.client.publish(`wait/${channel}`, hash.bytes, { qos: 1 })
             const timer = setTimeout(() => {
                 cleanup()
                 reject(new DeliveryError(`Timed out after ${timeout}ms`))
@@ -293,10 +301,10 @@ export class MqttBroker implements Broker {
         })
     }
 
-    private addSubscriber(sub: {channel: string; updater: Updater}) {
+    private addSubscriber(sub: { channel: string; updater: Updater }) {
         return new Promise<void>((resolve, reject) => {
             const topic = `channel/${sub.channel}`
-            this.client.subscribe(topic, {qos: 2}, (error) => {
+            this.client.subscribe(topic, { qos: this.mqtt_publish_qos }, (error) => {
                 if (error) {
                     reject(error)
                 } else {
@@ -307,15 +315,15 @@ export class MqttBroker implements Broker {
         })
     }
 
-    private removeSubscriber(sub: {channel: string; updater: Updater}) {
+    private removeSubscriber(sub: { channel: string; updater: Updater }) {
         const idx = this.subscribers.indexOf(sub)
         if (idx !== -1) {
             this.subscribers.splice(idx, 1)
         }
-        const active = this.subscribers.find(({channel}) => sub.channel === channel)
+        const active = this.subscribers.find(({ channel }) => sub.channel === channel)
         if (!active) {
             const topic = `channel/${sub.channel}`
-            this.logger.debug({topic}, 'unsubscribing from inactive topic')
+            this.logger.debug({ topic }, 'unsubscribing from inactive topic')
             this.client.unsubscribe(topic, (error: any) => {
                 if (error) {
                     this.logger.warn(error, 'error during channel unsubscribe')

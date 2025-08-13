@@ -1,6 +1,6 @@
 import type Logger from 'bunyan'
-import {Broker, DeliveryState, SendContext, SendOptions, Updater} from './broker'
-import {CancelError, DeliveryError} from './errors'
+import { Broker, DeliveryState, SendContext, SendOptions, Updater } from './broker'
+import { CancelError, DeliveryError } from './errors'
 import LRUCache from 'lru-cache'
 
 export interface MemoryBrokerOptions {
@@ -12,7 +12,7 @@ export interface MemoryBrokerOptions {
 
 export class MemoryBroker implements Broker {
     private cache: LRUCache<string, Buffer>
-    private subscribers: Array<{channel: string; updater: Updater}> = []
+    private subscribers: Array<{ channel: string; updater: Updater }> = []
     private waiting: Map<string, (updater: Updater) => void> = new Map()
 
     constructor(options: MemoryBrokerOptions, private logger: Logger) {
@@ -34,23 +34,23 @@ export class MemoryBroker implements Broker {
     async healthCheck() {}
 
     async subscribe(channel: string, updater: Updater) {
-        this.logger.debug({channel}, 'new subscription')
-        const sub = {channel, updater}
+        this.logger.debug({ channel }, 'new subscription')
+        const sub = { channel, updater }
         this.subscribers.push(sub)
         setImmediate(() => {
             if (this.cache.has(channel)) {
-                this.logger.debug({channel}, 'delivering cached payload')
+                this.logger.debug({ channel }, 'delivering cached payload')
                 sub.updater(this.cache.get(channel)!)
                 this.cache.del(channel)
             }
             if (this.waiting.has(channel)) {
-                this.logger.debug({channel}, 'resolving waiting delivery')
+                this.logger.debug({ channel }, 'resolving waiting delivery')
                 this.waiting.get(channel)!(sub.updater)
             }
         })
         return () => {
             const idx = this.subscribers.indexOf(sub)
-            this.logger.debug({channel, idx}, 'unsubscribe')
+            this.logger.debug({ channel, idx }, 'unsubscribe')
             this.subscribers.splice(idx, 1)
         }
     }
@@ -67,12 +67,12 @@ export class MemoryBroker implements Broker {
             if (cancelled) {
                 throw new CancelError()
             }
-            this.logger.debug({channel}, 'direct delivery to %d subscriber(s)', updaters.length)
+            this.logger.debug({ channel }, 'direct delivery to %d subscriber(s)', updaters.length)
             const results = await Promise.allSettled(updaters.map((fn) => fn(payload)))
             const delivery = results.some((result) => result.status === 'fulfilled')
             if (!delivery) {
                 const result = results.find(
-                    ({status}) => status === 'rejected'
+                    ({ status }) => status === 'rejected'
                 ) as PromiseRejectedResult
                 throw new DeliveryError(result?.reason?.message || 'Unknown')
             }
@@ -82,7 +82,7 @@ export class MemoryBroker implements Broker {
                 if (cancelled) {
                     throw new CancelError()
                 }
-                this.logger.debug({channel}, 'buffered delivery')
+                this.logger.debug({ channel }, 'buffered delivery')
                 this.cache.set(channel, payload)
                 return DeliveryState.buffered
             } else {
